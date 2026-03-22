@@ -10,7 +10,7 @@ import { config } from './config.js';
 import { logger } from './logger.js';
 
 export interface PreflightResult {
-  claudeDir: string;
+  sources: Array<{ name: string; dir: string; resolvedVia: string }>;
   port: number;
   pairedDevices: number;
 }
@@ -18,7 +18,7 @@ export interface PreflightResult {
 /**
  * Pixel Office Bridge Server
  *
- * Watches Claude Code session files and broadcasts events
+ * Watches AI coding agent session files and broadcasts events
  * to connected iOS clients via WebSocket.
  */
 export class PixelOfficeBridge {
@@ -40,14 +40,33 @@ export class PixelOfficeBridge {
 
   /** Run pre-flight validation without starting anything */
   preflight(): PreflightResult {
-    if (!existsSync(config.claudeDir)) {
+    const sources: PreflightResult['sources'] = [];
+
+    if (config.claude && existsSync(config.claude.dir)) {
+      sources.push({
+        name: 'Claude Code',
+        dir: config.claude.dir,
+        resolvedVia: config.claude.resolvedVia,
+      });
+    }
+
+    if (config.copilot && existsSync(config.copilot.dir)) {
+      sources.push({
+        name: 'Copilot CLI',
+        dir: config.copilot.dir,
+        resolvedVia: config.copilot.resolvedVia,
+      });
+    }
+
+    if (sources.length === 0) {
       throw new Error(
-        `Claude Code not found at ${config.claudeDir}`
+        'No supported AI coding agent found.\n' +
+        'Install Claude Code or GitHub Copilot CLI, or use --claude-dir / --copilot-dir.'
       );
     }
 
     return {
-      claudeDir: config.claudeDir,
+      sources,
       port: config.wsPort,
       pairedDevices: this.authManager.tokens.size,
     };
@@ -81,8 +100,14 @@ export class PixelOfficeBridge {
 
       this.isRunning = true;
 
-      logger.verbose('Bridge', `Claude dir: ${config.claudeDir} (${config.claudeDirResolvedVia})`);
-      logger.verbose('Bridge', `Watching: ${config.projectsDir}`);
+      if (config.claude) {
+        logger.verbose('Bridge', `Claude dir: ${config.claude.dir} (${config.claude.resolvedVia})`);
+        logger.verbose('Bridge', `Watching: ${config.claude.watchDir}`);
+      }
+      if (config.copilot) {
+        logger.verbose('Bridge', `Copilot dir: ${config.copilot.dir} (${config.copilot.resolvedVia})`);
+        logger.verbose('Bridge', `Watching: ${config.copilot.watchDir}`);
+      }
 
       this.setupShutdownHandlers();
 
@@ -93,16 +118,16 @@ export class PixelOfficeBridge {
   }
 
   private setupEventHandlers(): void {
-    this.watcher.on('session', ({ sessionId, agentId, project }) => {
-      this.sessionManager.registerSession(sessionId, project, agentId);
+    this.watcher.on('session', ({ sessionId, agentId, project, source }) => {
+      this.sessionManager.registerSession(sessionId, project, agentId, source);
 
       if (agentId) {
         this.sessionManager.correlateAgentFile(sessionId, agentId);
       }
     });
 
-    this.watcher.on('line', ({ line, sessionId, agentId, filePath }) => {
-      this.handleNewLine(line, sessionId, agentId, filePath);
+    this.watcher.on('line', ({ line, sessionId, agentId, filePath, source }) => {
+      this.handleNewLine(line, sessionId, agentId, filePath, source);
     });
 
     this.watcher.on('error', (error) => {
@@ -119,10 +144,11 @@ export class PixelOfficeBridge {
     sessionId: string,
     agentId: string | null,
     filePath: string,
+    source: string,
   ): void {
     if (!this.sessionManager.sessions.has(sessionId)) {
       const { project } = this.watcher.parseFilePath(filePath);
-      this.sessionManager.registerSession(sessionId, project, agentId);
+      this.sessionManager.registerSession(sessionId, project, agentId, source);
     }
 
     const resolvedAgentId = agentId
@@ -131,7 +157,7 @@ export class PixelOfficeBridge {
     const raw = parseJsonlLine(line, sessionId, resolvedAgentId);
     if (!raw) return;
 
-    const events = transformToPixelEvents(raw);
+    const events = transformToPixelEvents(raw, source);
 
     this.sessionManager.recordActivity(sessionId);
 

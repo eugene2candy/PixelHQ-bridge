@@ -1,7 +1,7 @@
 {
   "name": "pixelhq",
   "version": "1.0.1",
-  "description": "Bridge server that watches Claude Code files and broadcasts events via WebSocket",
+  "description": "Bridge server that watches AI coding agent session files and broadcasts events via WebSocket",
   "type": "module",
   "main": "dist/src/index.js",
   "bin": {
@@ -25,6 +25,8 @@
   },
   "keywords": [
     "claude-code",
+    "copilot-cli",
+    "github-copilot",
     "websocket",
     "pixel-office",
     "pixelhq"

@@ -1,5 +1,5 @@
 import { watch, type FSWatcher } from 'chokidar';
-import { createReadStream, statSync } from 'fs';
+import { createReadStream, statSync, readFileSync } from 'fs';
 import { createInterface } from 'readline';
 import { join, basename, dirname } from 'path';
 import { TypedEmitter } from './typed-emitter.js';
@@ -14,26 +14,43 @@ interface WatcherEvents {
 }
 
 /**
- * Watches Claude Code session JSONL files for new events.
+ * Watches session JSONL files from multiple AI coding agents.
  * Emits 'line' events for each new JSONL line.
  */
 export class SessionWatcher extends TypedEmitter<WatcherEvents> {
   private watcher: FSWatcher | null;
   private filePositions: Map<string, number>;
   private trackedSessions: Set<string>;
+  private copilotProjectCache: Map<string, string>;
 
   constructor() {
     super();
     this.watcher = null;
     this.filePositions = new Map();
     this.trackedSessions = new Set();
+    this.copilotProjectCache = new Map();
   }
 
   start(): void {
-    const watchPatterns = [
-      join(config.projectsDir, '*', '*.jsonl'),
-      join(config.projectsDir, '*', '*', 'subagents', '*.jsonl'),
-    ];
+    const watchPatterns: string[] = [];
+
+    if (config.claude) {
+      watchPatterns.push(
+        join(config.claude.watchDir, '*', '*.jsonl'),
+        join(config.claude.watchDir, '*', '*', 'subagents', '*.jsonl'),
+      );
+    }
+
+    if (config.copilot) {
+      watchPatterns.push(
+        join(config.copilot.watchDir, '*', 'events.jsonl'),
+      );
+    }
+
+    if (watchPatterns.length === 0) {
+      logger.error('Watcher', 'No watch patterns configured');
+      return;
+    }
 
     logger.verbose('Watcher', 'Starting file watcher...');
 
@@ -76,10 +93,10 @@ export class SessionWatcher extends TypedEmitter<WatcherEvents> {
         return;
       }
 
-      const { sessionId, agentId, project } = this.parseFilePath(filePath);
+      const { sessionId, agentId, project, source } = this.parseFilePath(filePath);
       const minutesAgo = Math.round(modifiedAgo / 60000);
 
-      logger.verbose('Watcher', `Tracking recent session: ${sessionId.slice(0, 8)}... (${minutesAgo}m ago)`);
+      logger.verbose('Watcher', `Tracking recent ${source} session: ${sessionId.slice(0, 8)}... (${minutesAgo}m ago)`);
 
       this.filePositions.set(filePath, stats.size);
       this.trackedSessions.add(sessionId);
@@ -90,6 +107,7 @@ export class SessionWatcher extends TypedEmitter<WatcherEvents> {
         project,
         filePath,
         action: 'discovered',
+        source,
       });
     } catch (err) {
       logger.error('Watcher', `Error reading file stats: ${(err as Error).message}`);
@@ -97,7 +115,7 @@ export class SessionWatcher extends TypedEmitter<WatcherEvents> {
   }
 
   async handleFileChange(filePath: string): Promise<void> {
-    const { sessionId, agentId } = this.parseFilePath(filePath);
+    const { sessionId, agentId, source } = this.parseFilePath(filePath);
     const previousPosition = this.filePositions.get(filePath) || 0;
 
     try {
@@ -119,6 +137,7 @@ export class SessionWatcher extends TypedEmitter<WatcherEvents> {
           project,
           filePath,
           action: 'discovered',
+          source,
         });
       }
 
@@ -132,6 +151,7 @@ export class SessionWatcher extends TypedEmitter<WatcherEvents> {
             sessionId,
             agentId,
             filePath,
+            source,
           });
         }
       }
@@ -160,6 +180,15 @@ export class SessionWatcher extends TypedEmitter<WatcherEvents> {
   }
 
   parseFilePath(filePath: string): ParsedFilePath {
+    // Detect source from file path
+    if (config.copilot && filePath.startsWith(config.copilot.watchDir)) {
+      return this.parseCopilotFilePath(filePath);
+    }
+
+    return this.parseClaudeFilePath(filePath);
+  }
+
+  private parseClaudeFilePath(filePath: string): ParsedFilePath {
     const fileName = basename(filePath, '.jsonl');
     const dirPath = dirname(filePath);
 
@@ -185,6 +214,54 @@ export class SessionWatcher extends TypedEmitter<WatcherEvents> {
       sessionId,
       agentId,
       project: projectPath,
+      source: 'claude-code',
     };
+  }
+
+  private parseCopilotFilePath(filePath: string): ParsedFilePath {
+    // ~/.copilot/session-state/<session-id>/events.jsonl
+    const sessionDir = dirname(filePath);
+    const sessionId = basename(sessionDir);
+    const project = this.resolveCopilotProject(sessionDir, sessionId);
+
+    return {
+      sessionId,
+      agentId: null,
+      project,
+      source: 'copilot-cli',
+    };
+  }
+
+  private resolveCopilotProject(sessionDir: string, sessionId: string): string {
+    if (this.copilotProjectCache.has(sessionId)) {
+      return this.copilotProjectCache.get(sessionId)!;
+    }
+
+    try {
+      const workspaceFile = join(sessionDir, 'workspace.yaml');
+      const content = readFileSync(workspaceFile, 'utf-8');
+      const project = this.parseProjectFromWorkspaceYaml(content);
+      if (project) {
+        this.copilotProjectCache.set(sessionId, project);
+        return project;
+      }
+    } catch {
+      // workspace.yaml may not exist yet
+    }
+
+    return sessionId.slice(0, 8);
+  }
+
+  private parseProjectFromWorkspaceYaml(content: string): string | null {
+    for (const line of content.split('\n')) {
+      // Try cwd first (most descriptive), then git_root
+      const match = line.match(/^(?:cwd|git_root):\s*(.+)$/);
+      if (match) {
+        const fullPath = match[1]!.trim();
+        const parts = fullPath.split('/');
+        return parts[parts.length - 1] || null;
+      }
+    }
+    return null;
   }
 }

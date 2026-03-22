@@ -40,6 +40,32 @@ function handleNewLine(line: string, sessionId: string, agentId: string | null =
   }
 }
 
+function handleNewLineCopilot(line: string, sessionId: string, agentId: string | null = null): void {
+  const raw = parseJsonlLine(line, sessionId, agentId);
+  if (!raw) return;
+
+  const events = transformToPixelEvents(raw, 'copilot-cli');
+  sessionManager.recordActivity(sessionId);
+
+  for (const event of events) {
+    if (event.type === 'tool' && event.tool === 'spawn_agent' && event.status === 'started') {
+      sessionManager.trackTaskSpawn(sessionId, event.toolUseId);
+    }
+    if (event.type === 'tool' && (event.status === 'completed' || event.status === 'error')) {
+      if (sessionManager.handleTaskResult(sessionId, event.toolUseId)) {
+        const agentCompleted = createAgentEvent(
+          sessionId,
+          event.toolUseId,
+          event.timestamp,
+          event.status === 'error' ? 'error' : 'completed',
+        );
+        broadcast.push(agentCompleted);
+      }
+    }
+    broadcast.push(event);
+  }
+}
+
 beforeEach(() => {
   sessionManager = new SessionManager();
   broadcast = [];
@@ -527,5 +553,129 @@ describe('iOS decode contract', () => {
     for (const event of broadcast) {
       assertDecodable(event);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Copilot CLI pipeline tests
+// ---------------------------------------------------------------------------
+
+describe('Copilot CLI pipeline', () => {
+  it('full Copilot session lifecycle', () => {
+    const sid = 'sess-copilot-pipeline';
+
+    // 1. Session registered with copilot source
+    sessionManager.registerSession(sid, 'my-app', null, 'copilot-cli');
+    expect(broadcast).toHaveLength(1);
+    expect(broadcast[0]!.type).toBe('session');
+    expect('source' in broadcast[0]! && broadcast[0]!.source).toBe('copilot-cli');
+
+    // 2. User message
+    handleNewLineCopilot(JSON.stringify({
+      type: 'user.message',
+      data: { content: 'Fix the bug in auth.ts' },
+      id: 'evt-1', timestamp: '2026-03-22T12:00:00Z', parentId: null,
+    }), sid);
+    expect(broadcast[1]!.type).toBe('activity');
+    expect((broadcast[1] as { action: string }).action).toBe('user_prompt');
+
+    // 3. Turn starts (thinking)
+    handleNewLineCopilot(JSON.stringify({
+      type: 'assistant.turn_start',
+      data: { turnId: '0' },
+      id: 'evt-2', timestamp: '2026-03-22T12:00:01Z', parentId: 'evt-1',
+    }), sid);
+    expect(broadcast[2]!.type).toBe('activity');
+    expect((broadcast[2] as { action: string }).action).toBe('thinking');
+
+    // 4. Tool: view a file
+    handleNewLineCopilot(JSON.stringify({
+      type: 'tool.execution_start',
+      data: {
+        toolCallId: 'call-1',
+        toolName: 'view',
+        arguments: { path: '/Users/dev/my-app/src/auth.ts' },
+      },
+      id: 'evt-3', timestamp: '2026-03-22T12:00:02Z', parentId: 'evt-2',
+    }), sid);
+    expect(broadcast[3]!.type).toBe('tool');
+    expect((broadcast[3] as { tool: string }).tool).toBe('file_read');
+    expect((broadcast[3] as { context: string }).context).toBe('auth.ts');
+
+    // 5. Tool completes
+    handleNewLineCopilot(JSON.stringify({
+      type: 'tool.execution_complete',
+      data: { toolCallId: 'call-1', success: true, result: { content: 'file contents...' } },
+      id: 'evt-4', timestamp: '2026-03-22T12:00:03Z', parentId: 'evt-3',
+    }), sid);
+    expect(broadcast[4]!.type).toBe('tool');
+    expect((broadcast[4] as { status: string }).status).toBe('completed');
+
+    // 6. Assistant responds
+    handleNewLineCopilot(JSON.stringify({
+      type: 'assistant.message',
+      data: { content: 'I found the issue.', outputTokens: 100 },
+      id: 'evt-5', timestamp: '2026-03-22T12:00:04Z', parentId: 'evt-4',
+    }), sid);
+    const responding = broadcast.find(
+      (e, i) => i >= 5 && e.type === 'activity' && (e as { action: string }).action === 'responding',
+    );
+    expect(responding).toBeDefined();
+
+    // 7. Turn ends
+    handleNewLineCopilot(JSON.stringify({
+      type: 'assistant.turn_end',
+      data: { turnId: '0' },
+      id: 'evt-6', timestamp: '2026-03-22T12:00:05Z', parentId: 'evt-5',
+    }), sid);
+    const summary = broadcast.find(e => e.type === 'summary');
+    expect(summary).toBeDefined();
+
+    // Privacy check
+    const json = JSON.stringify(broadcast);
+    expect(json).not.toContain('/Users/dev');
+    expect(json).not.toContain('Fix the bug');
+    expect(json).not.toContain('I found the issue');
+  });
+
+  it('Copilot CLI privacy: never leaks sensitive data', () => {
+    const sid = 'sess-copilot-privacy';
+    sessionManager.registerSession(sid, 'secret-project', null, 'copilot-cli');
+    broadcast.length = 0;
+
+    const sensitiveLines = [
+      JSON.stringify({
+        type: 'tool.execution_start',
+        data: {
+          toolCallId: 'c1', toolName: 'view',
+          arguments: { path: '/Users/wayne/.env' },
+        },
+        id: 'e1', timestamp: '2026-03-22T12:00:00Z', parentId: null,
+      }),
+      JSON.stringify({
+        type: 'tool.execution_complete',
+        data: {
+          toolCallId: 'c1', success: true,
+          result: { content: 'API_KEY=sk-abc123\nDB_PASS=hunter2' },
+        },
+        id: 'e2', timestamp: '2026-03-22T12:00:01Z', parentId: 'e1',
+      }),
+      JSON.stringify({
+        type: 'assistant.message',
+        data: { content: 'Your API_KEY=sk-abc123 is exposed!', outputTokens: 50 },
+        id: 'e3', timestamp: '2026-03-22T12:00:02Z', parentId: 'e2',
+      }),
+    ];
+
+    for (const line of sensitiveLines) {
+      handleNewLineCopilot(line, sid);
+    }
+
+    const allJson = JSON.stringify(broadcast);
+    expect(allJson).not.toContain('sk-abc123');
+    expect(allJson).not.toContain('hunter2');
+    expect(allJson).not.toContain('API_KEY');
+    expect(allJson).not.toContain('DB_PASS');
+    expect(allJson).not.toContain('/Users/wayne');
   });
 });

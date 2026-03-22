@@ -51,6 +51,32 @@ describe('TOOL_TO_CATEGORY', () => {
     }
   });
 
+  it('maps all Copilot CLI tools to categories', () => {
+    const expectedMappings: Record<string, string> = {
+      view: 'file_read',
+      edit: 'file_write',
+      create: 'file_write',
+      bash: 'terminal',
+      read_bash: 'terminal',
+      write_bash: 'terminal',
+      stop_bash: 'terminal',
+      list_bash: 'terminal',
+      grep: 'search',
+      glob: 'search',
+      web_fetch: 'search',
+      web_search: 'search',
+      task: 'spawn_agent',
+      sql: 'plan',
+      store_memory: 'plan',
+      ask_user: 'communicate',
+    };
+
+    for (const [tool, expectedCategory] of Object.entries(expectedMappings)) {
+      expect(TOOL_TO_CATEGORY[tool]?.category).toBe(expectedCategory);
+      expect(TOOL_TO_CATEGORY[tool]?.detail).toBeDefined();
+    }
+  });
+
   it('provides unique detail strings for each tool', () => {
     const details = Object.values(TOOL_TO_CATEGORY).map(m => m.detail);
     expect(details.every(d => typeof d === 'string' && d.length > 0)).toBe(true);
@@ -58,11 +84,24 @@ describe('TOOL_TO_CATEGORY', () => {
 });
 
 describe('resolveClaudeDir (integration)', () => {
-  it('config module loads with resolved paths', async () => {
+  it('config module loads with at least one source', async () => {
     const { config } = await import('../src/config.js');
-    expect(config.claudeDir).toBeDefined();
-    expect(config.projectsDir).toBeDefined();
-    expect(config.claudeDirResolvedVia).toBeDefined();
+    // At least one source must be available
+    expect(config.claude || config.copilot).toBeTruthy();
     expect(config.watchDebounce).toBe(100);
+  });
+
+  it('source objects have required fields when present', async () => {
+    const { config } = await import('../src/config.js');
+    if (config.claude) {
+      expect(config.claude.dir).toBeDefined();
+      expect(config.claude.watchDir).toBeDefined();
+      expect(config.claude.resolvedVia).toBeDefined();
+    }
+    if (config.copilot) {
+      expect(config.copilot.dir).toBeDefined();
+      expect(config.copilot.watchDir).toBeDefined();
+      expect(config.copilot.resolvedVia).toBeDefined();
+    }
   });
 });

@@ -26,7 +26,7 @@ const pkg = JSON.parse(readFileSync(findPackageJson(__dirname), 'utf-8')) as {
 };
 
 // ---------------------------------------------------------------------------
-// Claude directory auto-detection
+// CLI argument helpers
 // ---------------------------------------------------------------------------
 
 function getCliArg(name: string): string | null {
@@ -39,13 +39,17 @@ function hasCliFlag(name: string): boolean {
   return process.argv.includes(`--${name}`);
 }
 
-interface ResolvedClaudeDir {
-  claudeDir: string;
-  projectsDir: string;
+// ---------------------------------------------------------------------------
+// Source directory resolution
+// ---------------------------------------------------------------------------
+
+export interface ResolvedSource {
+  dir: string;
+  watchDir: string;
   resolvedVia: string;
 }
 
-export function resolveClaudeDir(): ResolvedClaudeDir {
+export function resolveClaudeDir(): ResolvedSource | null {
   const home = homedir();
   const candidates: { path: string | null | undefined; via: string }[] = [
     { path: getCliArg('claude-dir'), via: '--claude-dir flag' },
@@ -58,34 +62,61 @@ export function resolveClaudeDir(): ResolvedClaudeDir {
     if (!path) continue;
     const projectsDir = join(path, 'projects');
     if (existsSync(projectsDir)) {
-      return { claudeDir: path, projectsDir, resolvedVia: via };
+      return { dir: path, watchDir: projectsDir, resolvedVia: via };
     }
     if (existsSync(path)) {
-      return { claudeDir: path, projectsDir, resolvedVia: `${via} (no projects/ yet)` };
+      return { dir: path, watchDir: projectsDir, resolvedVia: `${via} (no projects/ yet)` };
     }
   }
 
+  return null;
+}
+
+export function resolveCopilotDir(): ResolvedSource | null {
+  const home = homedir();
+  const candidates: { path: string | null | undefined; via: string }[] = [
+    { path: getCliArg('copilot-dir'), via: '--copilot-dir flag' },
+    { path: process.env.COPILOT_CONFIG_DIR, via: 'COPILOT_CONFIG_DIR env' },
+    { path: join(home, '.copilot'), via: 'default (~/.copilot)' },
+  ];
+
+  for (const { path, via } of candidates) {
+    if (!path) continue;
+    const sessionStateDir = join(path, 'session-state');
+    if (existsSync(sessionStateDir)) {
+      return { dir: path, watchDir: sessionStateDir, resolvedVia: via };
+    }
+    if (existsSync(path)) {
+      return { dir: path, watchDir: sessionStateDir, resolvedVia: `${via} (no session-state/ yet)` };
+    }
+  }
+
+  return null;
+}
+
+// Resolve once at import time — null means not available
+const resolvedClaude = resolveClaudeDir();
+const resolvedCopilot = resolveCopilotDir();
+
+if (!resolvedClaude && !resolvedCopilot) {
   throw new Error(
-    'Could not find Claude config directory. Tried:\n' +
-    candidates
-      .filter(c => c.path)
-      .map(c => `  - ${c.path} (${c.via})`)
-      .join('\n') +
-    '\n\nUse --claude-dir <path> to specify the directory manually.'
+    'No supported AI coding agent found.\n\n' +
+    'Looked for:\n' +
+    '  - Claude Code at ~/.claude\n' +
+    '  - GitHub Copilot CLI at ~/.copilot\n\n' +
+    'Use --claude-dir or --copilot-dir to specify a directory manually.'
   );
 }
 
-// Resolve once at import time
-const resolved = resolveClaudeDir();
+const primaryDir = (resolvedClaude?.dir ?? resolvedCopilot?.dir)!;
 
 // ---------------------------------------------------------------------------
 // Bridge server configuration
 // ---------------------------------------------------------------------------
 
 export const config = {
-  claudeDir: resolved.claudeDir,
-  projectsDir: resolved.projectsDir,
-  claudeDirResolvedVia: resolved.resolvedVia,
+  claude: resolvedClaude,
+  copilot: resolvedCopilot,
   version: pkg.version,
   wsPort: Number(getCliArg('port') || process.env.PIXEL_OFFICE_PORT || 8765),
   bonjourName: 'Pixel Office Bridge',
@@ -93,7 +124,7 @@ export const config = {
   watchDebounce: 100,
   sessionTtlMs: 2 * 60 * 1000,
   sessionReapIntervalMs: 30 * 1000,
-  authTokenFile: join(resolved.claudeDir, 'pixel-office-auth.json'),
+  authTokenFile: join(primaryDir, 'pixel-office-auth.json'),
   verbose: hasCliFlag('verbose'),
   nonInteractive: hasCliFlag('yes') || hasCliFlag('y') || process.env.CI === 'true',
 } as const;
@@ -128,6 +159,7 @@ export const ToolCategory = {
 } as const;
 
 export const TOOL_TO_CATEGORY: Record<string, ToolMapping> = {
+  // Claude Code tools (PascalCase)
   Read:            { category: ToolCategory.FILE_READ,    detail: 'read' },
   Write:           { category: ToolCategory.FILE_WRITE,   detail: 'write' },
   Edit:            { category: ToolCategory.FILE_WRITE,   detail: 'edit' },
@@ -142,4 +174,22 @@ export const TOOL_TO_CATEGORY: Record<string, ToolMapping> = {
   ExitPlanMode:    { category: ToolCategory.PLAN,         detail: 'exit_plan' },
   AskUserQuestion: { category: ToolCategory.COMMUNICATE,  detail: 'ask_user' },
   NotebookEdit:    { category: ToolCategory.NOTEBOOK,     detail: 'notebook' },
+
+  // Copilot CLI tools (lowercase)
+  view:            { category: ToolCategory.FILE_READ,    detail: 'read' },
+  edit:            { category: ToolCategory.FILE_WRITE,   detail: 'edit' },
+  create:          { category: ToolCategory.FILE_WRITE,   detail: 'write' },
+  bash:            { category: ToolCategory.TERMINAL,     detail: 'bash' },
+  read_bash:       { category: ToolCategory.TERMINAL,     detail: 'bash' },
+  write_bash:      { category: ToolCategory.TERMINAL,     detail: 'bash' },
+  stop_bash:       { category: ToolCategory.TERMINAL,     detail: 'bash' },
+  list_bash:       { category: ToolCategory.TERMINAL,     detail: 'bash' },
+  grep:            { category: ToolCategory.SEARCH,       detail: 'grep' },
+  glob:            { category: ToolCategory.SEARCH,       detail: 'glob' },
+  web_fetch:       { category: ToolCategory.SEARCH,       detail: 'web_fetch' },
+  web_search:      { category: ToolCategory.SEARCH,       detail: 'web_search' },
+  task:            { category: ToolCategory.SPAWN_AGENT,  detail: 'task' },
+  sql:             { category: ToolCategory.PLAN,         detail: 'sql' },
+  store_memory:    { category: ToolCategory.PLAN,         detail: 'memory' },
+  ask_user:        { category: ToolCategory.COMMUNICATE,  detail: 'ask_user' },
 };

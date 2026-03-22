@@ -10,7 +10,8 @@ A local bridge server that watches AI coding agent session files and broadcasts 
 
 ### Supported Agents
 
-- **Claude Code** — fully supported today
+- **Claude Code** — fully supported
+- **GitHub Copilot CLI** — fully supported
 - **Cursor** — coming soon
 - **Codex** — coming soon
 - **Antigravity** — coming soon
@@ -28,6 +29,7 @@ Once running, the bridge displays a **6-digit pairing code**. Enter it in the Pi
 
 ```
   ✓ Claude Code detected at ~/.claude
+  ✓ Copilot CLI detected at ~/.copilot
   ✓ WebSocket server on port 8765
   ✓ Broadcasting on local network (192.168.1.100)
 
@@ -38,7 +40,7 @@ Once running, the bridge displays a **6-digit pairing code**. Enter it in the Pi
   ║  connect. Code regenerates on restart. ║
   ╚═══════════════════════════════════════╝
 
-  Waiting for Claude Code activity...
+  Waiting for AI coding agent activity...
   Press Ctrl+C to stop
 ```
 
@@ -65,6 +67,7 @@ pixelhq
 |------|-------------|---------|
 | `--port <number>` | WebSocket server port | `8765` |
 | `--claude-dir <path>` | Path to Claude config directory | auto-detected |
+| `--copilot-dir <path>` | Path to Copilot CLI config directory | auto-detected |
 | `--yes`, `-y` | Skip interactive prompts (non-interactive mode) | |
 | `--verbose` | Show detailed debug logging | |
 | `--help`, `-h` | Show help message | |
@@ -76,11 +79,14 @@ pixelhq
 |----------|-------------|
 | `PIXEL_OFFICE_PORT` | WebSocket server port (overridden by `--port`) |
 | `CLAUDE_CONFIG_DIR` | Claude config directory (overridden by `--claude-dir`) |
+| `COPILOT_CONFIG_DIR` | Copilot CLI config directory (overridden by `--copilot-dir`) |
 
 ## Requirements
 
 - **Node.js 20+**
-- **Claude Code** installed (the server watches `~/.claude/projects/`)
+- At least one supported AI coding agent installed:
+  - **Claude Code** (`~/.claude/projects/`)
+  - **GitHub Copilot CLI** (`~/.copilot/session-state/`)
 - iOS app on the **same local network** (for Bonjour discovery)
 
 ---
@@ -89,7 +95,7 @@ pixelhq
 
 This is a **local-only** server. It binds to your machine, broadcasts only on your local network, and **never contacts any external service**.
 
-The bridge reads Claude Code's raw JSONL session logs — which contain everything: your prompts, file contents, API keys in tool results, thinking text, bash commands, etc. **None of that is broadcast.** Every event goes through a strict privacy-stripping pipeline before it reaches the WebSocket.
+The bridge reads raw JSONL session logs — which contain everything: your prompts, file contents, API keys in tool results, thinking text, bash commands, etc. **None of that is broadcast.** Every event goes through a strict privacy-stripping pipeline before it reaches the WebSocket.
 
 ### What IS broadcast
 
@@ -141,8 +147,8 @@ JSONL file  →  Parser  →  Adapter  →  WebSocket
 (raw data)    (parse)    (strip)     (broadcast)
 ```
 
-1. **Parser** (`src/parser.ts`) — Reads raw JSONL, parses JSON, passes structured data to the adapter.
-2. **Adapter** (`src/adapters/claude-code.ts`) — The privacy gate. Uses an explicit allowlist per tool to extract only safe fields. Unknown tools produce no context at all.
+1. **Parser** (`src/parser.ts`) — Reads raw JSONL, parses JSON, routes to the appropriate adapter based on source.
+2. **Adapter** (`src/adapters/claude-code.ts`, `src/adapters/copilot-cli.ts`) — The privacy gate. Uses an explicit allowlist per tool to extract only safe fields. Unknown tools produce no context at all.
 3. **Broadcast** (`src/websocket.ts`) — Sends the already-filtered events to connected clients. No additional data is added.
 
 Privacy utilities (`toBasename`, `toProjectName` in `src/pixel-events.ts`) ensure paths are always stripped to their last segment.
@@ -152,8 +158,9 @@ Privacy utilities (`toBasename`, `toProjectName` in `src/pixel-events.ts`) ensur
 The test suite includes dedicated privacy tests that feed sensitive data (API keys, passwords, file paths, secrets) through the full pipeline and assert **none of it appears in broadcast output**:
 
 ```
-tests/pipeline.test.ts            → Full pipeline privacy verification
-tests/claude-code-adapter.test.ts → Per-tool privacy audit
+tests/pipeline.test.ts            → Full pipeline privacy verification (Claude Code + Copilot CLI)
+tests/claude-code-adapter.test.ts → Per-tool privacy audit (Claude Code)
+tests/copilot-cli-adapter.test.ts → Per-tool privacy audit (Copilot CLI)
 ```
 
 Run them yourself:
@@ -167,7 +174,8 @@ npm test
 ## How It Works
 
 ```
-~/.claude/projects/**/*.jsonl
+~/.claude/projects/**/*.jsonl          (Claude Code)
+~/.copilot/session-state/*/events.jsonl (Copilot CLI)
         │
         ▼
    ┌─────────┐     ┌─────────┐     ┌───────────┐     ┌────────────┐
@@ -183,8 +191,8 @@ npm test
                                                     iOS app (SpriteKit)
 ```
 
-1. **Watch** — Monitors Claude Code's append-only JSONL session files using chokidar
-2. **Parse** — Parses each new line as JSON, routes to the correct adapter
+1. **Watch** — Monitors session files from all supported agents using chokidar
+2. **Parse** — Parses each new line as JSON, routes to the correct adapter based on source
 3. **Transform** — Adapter strips sensitive content, maps tools to categories, produces normalized events
 4. **Broadcast** — Sends events over WebSocket to connected clients on the local network
 5. **Discover** — Advertises via Bonjour/mDNS so the iOS app finds the server automatically
@@ -296,9 +304,10 @@ pixelhq-bridge/
 │   ├── config.ts              # Configuration + CLI args
 │   ├── logger.ts              # Centralized logger (normal/verbose modes)
 │   ├── watcher.ts             # File watcher (chokidar)
-│   ├── parser.ts              # JSONL parsing
+│   ├── parser.ts              # JSONL parsing + adapter routing
 │   ├── adapters/
-│   │   └── claude-code.ts     # Privacy-stripping adapter
+│   │   ├── claude-code.ts     # Claude Code privacy-stripping adapter
+│   │   └── copilot-cli.ts     # Copilot CLI privacy-stripping adapter
 │   ├── pixel-events.ts        # Event factories + privacy utils
 │   ├── session.ts             # Session tracking + agent state
 │   ├── auth.ts                # Device pairing + token auth

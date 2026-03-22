@@ -32,23 +32,27 @@ if (args.includes('--help') || args.includes('-h')) {
   console.log(`
   ${pkg.name} v${pkg.version}
 
-  Watches Claude Code session files and broadcasts events
+  Watches AI coding agent session files and broadcasts events
   via WebSocket for the Pixel Office iOS app.
+
+  Supported agents: Claude Code, GitHub Copilot CLI
 
   Usage
     $ pixelhq [options]
 
   Options
-    --port <number>       WebSocket server port (default: 8765)
-    --claude-dir <path>   Path to Claude config directory
-    --yes, -y             Skip interactive prompts (non-interactive mode)
-    --verbose             Show detailed debug logging
-    --help, -h            Show this help message
-    --version, -v         Show version number
+    --port <number>         WebSocket server port (default: 8765)
+    --claude-dir <path>     Path to Claude config directory
+    --copilot-dir <path>    Path to Copilot CLI config directory
+    --yes, -y               Skip interactive prompts (non-interactive mode)
+    --verbose               Show detailed debug logging
+    --help, -h              Show this help message
+    --version, -v           Show version number
 
   Environment variables
-    PIXEL_OFFICE_PORT     WebSocket server port
-    CLAUDE_CONFIG_DIR     Path to Claude config directory
+    PIXEL_OFFICE_PORT       WebSocket server port
+    CLAUDE_CONFIG_DIR       Path to Claude config directory
+    COPILOT_CONFIG_DIR      Path to Copilot CLI config directory
 
   Examples
     $ npx pixelhq
@@ -56,6 +60,7 @@ if (args.includes('--help') || args.includes('-h')) {
     $ npx pixelhq --port 9999
     $ npx pixelhq --verbose
     $ pixelhq --claude-dir ~/.config/claude
+    $ pixelhq --copilot-dir ~/.copilot
 `);
   process.exit(0);
 }
@@ -94,17 +99,19 @@ async function showInteractiveMenu(
   PixelOfficeBridge: typeof import('../src/index.js').PixelOfficeBridge,
   logger: typeof import('../src/logger.js').logger,
 ): Promise<void> {
-  const { select, input } = await import('@inquirer/prompts');
+  const { select } = await import('@inquirer/prompts');
 
   console.log('');
   console.log(`  ${pkg.name} v${pkg.version}`);
   console.log('');
-  console.log('  Pixel Office Bridge watches your Claude Code sessions');
+  console.log('  Pixel Office Bridge watches your AI coding agent sessions');
   console.log('  and streams activity to the Pixel Office iOS app as');
   console.log('  real-time pixel art animations.');
   console.log('');
+  console.log('  Supported agents: Claude Code, GitHub Copilot CLI');
+  console.log('');
   console.log('  How it works:');
-  console.log('  \u2022 Watches ~/.claude/projects/ for session activity');
+  console.log('  \u2022 Auto-detects installed agents and watches for session activity');
   console.log('  \u2022 Broadcasts events on your local network via WebSocket');
   console.log('  \u2022 iOS app discovers this bridge automatically via Bonjour');
   console.log('');
@@ -117,63 +124,17 @@ async function showInteractiveMenu(
   console.log('  \u2022 Every release is provenance-verified on npm');
   console.log('');
 
-  let customPort: number | undefined;
-  let customClaudeDir: string | undefined;
-
   while (true) {
     const choice = await select({
       message: 'What would you like to do?',
       choices: [
         { name: 'Start bridge', value: 'start' },
-        { name: 'Configure options', value: 'configure' },
         { name: 'Exit', value: 'exit' },
       ],
     });
 
     if (choice === 'exit') {
       process.exit(0);
-    }
-
-    if (choice === 'configure') {
-      const portInput = await input({
-        message: 'WebSocket port:',
-        default: String(customPort ?? 8765),
-      });
-      const parsedPort = parseInt(portInput, 10);
-      if (!isNaN(parsedPort) && parsedPort > 0 && parsedPort < 65536) {
-        customPort = parsedPort;
-      }
-
-      const claudeDirInput = await input({
-        message: 'Claude config directory:',
-        default: customClaudeDir ?? '~/.claude',
-      });
-      if (claudeDirInput && claudeDirInput !== '~/.claude') {
-        customClaudeDir = claudeDirInput;
-      }
-
-      // Apply custom options by modifying argv before config re-reads
-      if (customPort) {
-        const portIdx = process.argv.indexOf('--port');
-        if (portIdx !== -1) {
-          process.argv[portIdx + 1] = String(customPort);
-        } else {
-          process.argv.push('--port', String(customPort));
-        }
-      }
-      if (customClaudeDir) {
-        const dirIdx = process.argv.indexOf('--claude-dir');
-        if (dirIdx !== -1) {
-          process.argv[dirIdx + 1] = customClaudeDir;
-        } else {
-          process.argv.push('--claude-dir', customClaudeDir);
-        }
-      }
-
-      console.log('');
-      console.log(`  Options updated. Port: ${customPort ?? 8765}, Claude dir: ${customClaudeDir ?? '~/.claude'}`);
-      console.log('');
-      continue;
     }
 
     if (choice === 'start') {
@@ -192,15 +153,19 @@ async function startBridge(
   // Pre-flight checks
   try {
     const info = bridge.preflight();
-    logger.info('\u2713 Claude Code detected at ' + info.claudeDir);
+    for (const source of info.sources) {
+      logger.info(`\u2713 ${source.name} detected at ${source.dir}`);
+    }
   } catch (err) {
     console.log('');
-    console.log('  \u2717 Claude Code not found');
+    console.log('  \u2717 No supported AI coding agent found');
     console.log('');
-    console.log('  Could not find ~/.claude/projects directory.');
-    console.log('  Make sure Claude Code is installed and has been used at least once.');
+    console.log('  Could not find session directories for any supported agent.');
+    console.log('  Supported agents: Claude Code (~/.claude), GitHub Copilot CLI (~/.copilot)');
     console.log('');
-    console.log('  Specify a custom path:  npx pixelhq --claude-dir /path/to/claude');
+    console.log('  Specify a custom path:');
+    console.log('    npx pixelhq --claude-dir /path/to/claude');
+    console.log('    npx pixelhq --copilot-dir /path/to/copilot');
     console.log('');
     process.exit(1);
   }
@@ -235,7 +200,7 @@ async function startBridge(
   console.log('  \u2551  connect. Code regenerates on restart. \u2551');
   console.log('  \u255A\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u255D');
   logger.blank();
-  logger.info('Waiting for Claude Code activity...');
+  logger.info('Waiting for AI coding agent activity...');
   logger.info('Press Ctrl+C to stop');
   logger.blank();
 }
